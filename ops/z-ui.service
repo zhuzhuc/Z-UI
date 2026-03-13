@@ -1,0 +1,41 @@
+[Unit]
+Description=Z-UI Backend Service
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/z-ui/backend
+ExecStart=/opt/z-ui/backend/z-ui
+Restart=always
+RestartSec=3
+
+Environment=GIN_MODE=release
+Environment=PORT=8081
+Environment=ZUI_DB=/opt/z-ui/data/zui.db
+Environment=ZUI_FRONT_DIR=/opt/z-ui/front/dist
+
+Environment=PANEL_USERNAME=admin
+Environment=PANEL_PASSWORD=CHANGE_ME
+Environment=PANEL_SECRET=CHANGE_ME_LONG_RANDOM
+Environment=PANEL_PUBLIC_BASE=https://panel.example.com
+Environment=CORS_ALLOW_ORIGINS=https://panel.example.com
+Environment=TRUSTED_PROXIES=127.0.0.1,::1
+
+Environment=XRAY_CONTROL=systemd
+Environment=XRAY_SERVICE=xray
+Environment=XRAY_CONFIG=/opt/z-ui/runtime/xray-config.json
+Environment=XRAY_ACCESS_LOG=/opt/z-ui/runtime/xray-access.log
+Environment=XRAY_ERROR_LOG=/opt/z-ui/runtime/xray-error.log
+
+# Optional env overrides
+EnvironmentFile=-/etc/z-ui/z-ui.env
+
+# Optional process mode instead of systemd mode:
+# Environment=XRAY_CONTROL=process
+# Environment=XRAY_BIN=/opt/z-ui/bin/xray
+
+[Install]
+WantedBy=multi-user.target
+

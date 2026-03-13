@@ -1,0 +1,21 @@
+# build/cache
+.gocache/
+.gocache-release/
+release/
+front/node_modules/
+front/dist/
+
+# runtime/data
+backend/*.db
+backend/runtime/
+runtime/
+data/
+
+# binaries
+bin/xray
+backend/z-ui
+
+# OS/editor
+.DS_Store
+.vscode/
+.idea/
