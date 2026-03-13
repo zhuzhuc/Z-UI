@@ -11,21 +11,6 @@
 - 面板：`http://127.0.0.1:8081/login.html`
 - 后端健康检查：`http://127.0.0.1:8081/api/v1/health`
 
-## 像 3X-UI 一样“下载发布包”
-
-构建可分发的压缩包（`tar.gz`）：
-
-```bash
-# 用法: scripts/build-download.sh <version> <os> <arch>
-scripts/build-download.sh v0.1.0 linux amd64
-```
-
-输出：
-
-- `release/z-ui-v0.1.0-linux-amd64.tar.gz`
-- `release/z-ui-v0.1.0-linux-amd64.sha256`
-
-你可以把这个压缩包上传到服务器或 GitHub Release，让用户直接下载。
 
 ## 服务器部署（VPS）
 
