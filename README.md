@@ -1,7 +1,3 @@
-# Z-UI
-
-一个接近 `3X-UI` 体验的 Xray/V2Ray 管理面板（Go 后端 + React 前端）。
-
 ## 快速启动（本地）
 
 ```bash
