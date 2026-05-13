@@ -168,5 +168,55 @@ func (m *XrayManager) SyncInboundUsageFromStats() (int, error) {
 		}
 		updated++
 	}
+
+	// Sync per-client traffic
+	for _, item := range overview.UserTraffic {
+		_ = m.store.UpsertClientTrafficByEmail(item.User, item.Uplink, item.Downlink)
+	}
+
 	return updated, nil
+}
+
+// QueryOnlineUsers queries xray's StatsService for currently online users.
+// Returns a list of email/identifier strings that have active traffic.
+func (m *XrayManager) QueryOnlineUsers() ([]string, error) {
+	conn, err := grpc.Dial(m.apiAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+
+	handlerClient := statsService.NewStatsServiceClient(conn)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Query all stats, then look for user-level entries with non-zero values
+	resp, err := handlerClient.QueryStats(ctx, &statsService.QueryStatsRequest{
+		Pattern: "",
+		Reset_:  false,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	seen := map[string]bool{}
+	for _, st := range resp.Stat {
+		name := st.Name
+		if strings.HasPrefix(name, "user>>>") && strings.Contains(name, ">>>traffic>>>") {
+			user, _, ok := parseUserStatName(name)
+			if !ok {
+				continue
+			}
+			if st.Value > 0 {
+				seen[user] = true
+			}
+		}
+	}
+
+	users := make([]string, 0, len(seen))
+	for u := range seen {
+		users = append(users, u)
+	}
+	sort.Strings(users)
+	return users, nil
 }

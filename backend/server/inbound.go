@@ -308,3 +308,397 @@ func isSupportedProtocol(v string) bool {
 		return false
 	}
 }
+
+// --- Client Management API ---
+
+type clientRequest struct {
+	Email    string `json:"email"`
+	ID       string `json:"id"`       // UUID for vless/vmess, password for trojan/ss
+	Password string `json:"password"` // alias for trojan/ss
+	Enable   *bool  `json:"enable"`
+}
+
+func (h *InboundHandler) ListClients(c *gin.Context) {
+	id, ok := parseIDParam(c)
+	if !ok {
+		return
+	}
+	item, err := h.store.GetInbound(id)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "inbound not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	clients, err := extractClientsFromSettings(item.Protocol, item.SettingsJSON)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"items": clients})
+}
+
+func (h *InboundHandler) AddClient(c *gin.Context) {
+	id, ok := parseIDParam(c)
+	if !ok {
+		return
+	}
+	var req clientRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid json body"})
+		return
+	}
+	if strings.TrimSpace(req.Email) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "email is required"})
+		return
+	}
+
+	item, err := h.store.GetInbound(id)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "inbound not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	newSettings, err := addClientToSettings(item.Protocol, item.SettingsJSON, req)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	item.SettingsJSON = newSettings
+	updated, err := h.store.UpdateInbound(id, item)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	recordAudit(c, h.store, "inbound.add_client", strconv.FormatInt(id, 10), req.Email)
+	c.JSON(http.StatusOK, updated)
+}
+
+func (h *InboundHandler) UpdateClient(c *gin.Context) {
+	id, ok := parseIDParam(c)
+	if !ok {
+		return
+	}
+	email := strings.TrimSpace(c.Param("email"))
+	if email == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "email is required"})
+		return
+	}
+	var req clientRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid json body"})
+		return
+	}
+
+	item, err := h.store.GetInbound(id)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "inbound not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	newSettings, err := updateClientInSettings(item.Protocol, item.SettingsJSON, email, req)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	item.SettingsJSON = newSettings
+	updated, err := h.store.UpdateInbound(id, item)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	recordAudit(c, h.store, "inbound.update_client", strconv.FormatInt(id, 10), email)
+	c.JSON(http.StatusOK, updated)
+}
+
+func (h *InboundHandler) DeleteClient(c *gin.Context) {
+	id, ok := parseIDParam(c)
+	if !ok {
+		return
+	}
+	email := strings.TrimSpace(c.Param("email"))
+	if email == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "email is required"})
+		return
+	}
+
+	item, err := h.store.GetInbound(id)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "inbound not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	newSettings, err := deleteClientFromSettings(item.Protocol, item.SettingsJSON, email)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	item.SettingsJSON = newSettings
+	updated, err := h.store.UpdateInbound(id, item)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	recordAudit(c, h.store, "inbound.delete_client", strconv.FormatInt(id, 10), email)
+	c.JSON(http.StatusOK, updated)
+}
+
+func (h *InboundHandler) Clone(c *gin.Context) {
+	id, ok := parseIDParam(c)
+	if !ok {
+		return
+	}
+	item, err := h.store.GetInbound(id)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "inbound not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Find an available port
+	item.Port = item.Port + 1
+	item.Remark = item.Remark + " (copy)"
+	item.Tag = item.Tag + "-copy"
+	item.UsedGB = 0
+	item.TotalGB = 0
+
+	created, err := h.store.CreateInbound(item)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	recordAudit(c, h.store, "inbound.clone", strconv.FormatInt(created.ID, 10), created.Remark)
+	c.JSON(http.StatusCreated, created)
+}
+
+func (h *InboundHandler) ResetTraffic(c *gin.Context) {
+	id, ok := parseIDParam(c)
+	if !ok {
+		return
+	}
+	item, err := h.store.GetInbound(id)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "inbound not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	item.UsedGB = 0
+	updated, err := h.store.UpdateInbound(id, item)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	recordAudit(c, h.store, "inbound.reset_traffic", strconv.FormatInt(id, 10), "")
+	c.JSON(http.StatusOK, updated)
+}
+
+// --- Client JSON manipulation helpers ---
+
+func extractClientsFromSettings(protocol, settingsJSON string) ([]map[string]any, error) {
+	var settings map[string]any
+	if err := json.Unmarshal([]byte(settingsJSON), &settings); err != nil {
+		return nil, err
+	}
+
+	// Shadowsocks uses "users" instead of "clients"
+	key := "clients"
+	if isShadowsocks(protocol) {
+		key = "users"
+	}
+
+	raw, ok := settings[key].([]any)
+	if !ok || len(raw) == 0 {
+		return []map[string]any{}, nil
+	}
+
+	clients := make([]map[string]any, 0, len(raw))
+	for _, r := range raw {
+		if m, ok := r.(map[string]any); ok {
+			clients = append(clients, m)
+		}
+	}
+	return clients, nil
+}
+
+func addClientToSettings(protocol, settingsJSON string, req clientRequest) (string, error) {
+	var settings map[string]any
+	if err := json.Unmarshal([]byte(settingsJSON), &settings); err != nil {
+		return "", err
+	}
+
+	key := "clients"
+	if isShadowsocks(protocol) {
+		key = "users"
+	}
+
+	raw, _ := settings[key].([]any)
+	// Check for duplicate email
+	for _, r := range raw {
+		if m, ok := r.(map[string]any); ok {
+			if e, _ := m["email"].(string); strings.EqualFold(strings.TrimSpace(e), strings.TrimSpace(req.Email)) {
+				return "", errors.New("client with this email already exists")
+			}
+		}
+	}
+
+	client := buildClientMap(protocol, req)
+	settings[key] = append(raw, client)
+
+	data, err := json.Marshal(settings)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+func updateClientInSettings(protocol, settingsJSON, email string, req clientRequest) (string, error) {
+	var settings map[string]any
+	if err := json.Unmarshal([]byte(settingsJSON), &settings); err != nil {
+		return "", err
+	}
+
+	key := "clients"
+	if isShadowsocks(protocol) {
+		key = "users"
+	}
+
+	raw, ok := settings[key].([]any)
+	if !ok {
+		return "", errors.New("no clients found")
+	}
+
+	found := false
+	for i, r := range raw {
+		m, ok := r.(map[string]any)
+		if !ok {
+			continue
+		}
+		e, _ := m["email"].(string)
+		if strings.EqualFold(strings.TrimSpace(e), strings.TrimSpace(email)) {
+			// Update fields
+			if req.Email != "" && req.Email != email {
+				m["email"] = req.Email
+			}
+			if req.ID != "" {
+				if isShadowsocks(protocol) {
+					m["password"] = req.ID
+				} else {
+					m["id"] = req.ID
+				}
+			}
+			if req.Password != "" {
+				m["password"] = req.Password
+			}
+			if req.Enable != nil {
+				m["enable"] = *req.Enable
+			}
+			raw[i] = m
+			found = true
+			break
+		}
+	}
+	if !found {
+		return "", errors.New("client not found")
+	}
+
+	settings[key] = raw
+	data, err := json.Marshal(settings)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+func deleteClientFromSettings(protocol, settingsJSON, email string) (string, error) {
+	var settings map[string]any
+	if err := json.Unmarshal([]byte(settingsJSON), &settings); err != nil {
+		return "", err
+	}
+
+	key := "clients"
+	if isShadowsocks(protocol) {
+		key = "users"
+	}
+
+	raw, ok := settings[key].([]any)
+	if !ok {
+		return "", errors.New("no clients found")
+	}
+
+	filtered := make([]any, 0, len(raw))
+	found := false
+	for _, r := range raw {
+		m, ok := r.(map[string]any)
+		if !ok {
+			continue
+		}
+		e, _ := m["email"].(string)
+		if strings.EqualFold(strings.TrimSpace(e), strings.TrimSpace(email)) {
+			found = true
+			continue
+		}
+		filtered = append(filtered, r)
+	}
+	if !found {
+		return "", errors.New("client not found")
+	}
+
+	settings[key] = filtered
+	data, err := json.Marshal(settings)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+func buildClientMap(protocol string, req clientRequest) map[string]any {
+	client := map[string]any{
+		"email": strings.TrimSpace(req.Email),
+	}
+	enable := true
+	if req.Enable != nil {
+		enable = *req.Enable
+	}
+	client["enable"] = enable
+
+	if isShadowsocks(protocol) {
+		client["password"] = req.ID
+		if req.Password != "" {
+			client["password"] = req.Password
+		}
+	} else if strings.ToLower(protocol) == "trojan" {
+		client["password"] = req.ID
+		if req.Password != "" {
+			client["password"] = req.Password
+		}
+	} else {
+		// vless/vmess
+		client["id"] = req.ID
+	}
+	return client
+}
+
+func isShadowsocks(protocol string) bool {
+	p := strings.ToLower(strings.TrimSpace(protocol))
+	return p == "shadowsocks" || p == "shadowsocks-2022" || p == "shadowsocks_2022"
+}

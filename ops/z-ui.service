@@ -1,41 +1,69 @@
 [Unit]
 Description=Z-UI Backend Service
 After=network.target
+Documentation=https://github.com/user/z-ui
 
 [Service]
 Type=simple
-User=root
-Group=root
-WorkingDirectory=/opt/z-ui/backend
-ExecStart=/opt/z-ui/backend/z-ui
-Restart=always
-RestartSec=3
+User=z-ui
+Group=z-ui
+WorkingDirectory=/opt/z-ui
 
+# Binary with version injection
+ExecStart=/opt/z-ui/bin/z-ui
+
+# Restart policy
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+# Environment — minimal inline, secrets in EnvironmentFile
 Environment=GIN_MODE=release
 Environment=PORT=8081
 Environment=ZUI_DB=/opt/z-ui/data/zui.db
 Environment=ZUI_FRONT_DIR=/opt/z-ui/front/dist
+Environment=ZUI_SECRET_FILE=/opt/z-ui/data/.panel_secret
 
-Environment=PANEL_USERNAME=admin
-Environment=PANEL_PASSWORD=CHANGE_ME
-Environment=PANEL_SECRET=CHANGE_ME_LONG_RANDOM
-Environment=PANEL_PUBLIC_BASE=https://panel.example.com
-Environment=CORS_ALLOW_ORIGINS=https://panel.example.com
-Environment=TRUSTED_PROXIES=127.0.0.1,::1
-
+# Xray configuration
 Environment=XRAY_CONTROL=systemd
 Environment=XRAY_SERVICE=xray
 Environment=XRAY_CONFIG=/opt/z-ui/runtime/xray-config.json
 Environment=XRAY_ACCESS_LOG=/opt/z-ui/runtime/xray-access.log
 Environment=XRAY_ERROR_LOG=/opt/z-ui/runtime/xray-error.log
 
-# Optional env overrides
+# Load secrets from file (create with: install -m 0600 -o z-ui -g z-ui /dev/null /etc/z-ui/z-ui.env)
 EnvironmentFile=-/etc/z-ui/z-ui.env
 
-# Optional process mode instead of systemd mode:
-# Environment=XRAY_CONTROL=process
-# Environment=XRAY_BIN=/opt/z-ui/bin/xray
+# Filesystem protection
+ProtectSystem=strict
+ReadWritePaths=/opt/z-ui/data /opt/z-ui/runtime
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+
+# Network hardening
+ProtectControlGroups=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+
+# Capability restrictions
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+# System call filtering
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=z-ui
 
 [Install]
 WantedBy=multi-user.target
-

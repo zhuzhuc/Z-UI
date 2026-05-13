@@ -1,5 +1,6 @@
 import React from 'react'
 import { api } from '../shared/api'
+import ConfirmDialog from '../components/ConfirmDialog'
 
 function genUUID() {
   if (window.crypto && window.crypto.randomUUID) return window.crypto.randomUUID()
@@ -156,7 +157,189 @@ function buildPayload(form) {
   }
 }
 
-export default function InboundsModule({ t = (k, f) => f || k, lang = 'zh' }) {
+function newClientForm(protocol) {
+  return {
+    email: '',
+    id: genUUID(),
+    password: '',
+    enable: true,
+  }
+}
+
+function ClientManager({ inboundId, protocol, t, zh }) {
+  const [clients, setClients] = React.useState([])
+  const [loading, setLoading] = React.useState(false)
+  const [showAdd, setShowAdd] = React.useState(false)
+  const [editClient, setEditClient] = React.useState(null)
+  const [clientForm, setClientForm] = React.useState(newClientForm(protocol))
+  const [confirm, setConfirm] = React.useState(null)
+
+  async function loadClients() {
+    if (!inboundId) return
+    setLoading(true)
+    try {
+      const res = await api(`/inbounds/${inboundId}/clients`)
+      setClients(res.clients || [])
+    } catch (e) {
+      // ignore
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  React.useEffect(() => {
+    loadClients()
+  }, [inboundId])
+
+  function openAdd() {
+    setClientForm(newClientForm(protocol))
+    setEditClient(null)
+    setShowAdd(true)
+  }
+
+  function openEdit(client) {
+    setClientForm({
+      email: client.email || '',
+      id: client.id || client.password || '',
+      password: client.password || '',
+      enable: client.enable !== false,
+    })
+    setEditClient(client.email)
+    setShowAdd(true)
+  }
+
+  async function saveClient(e) {
+    e.preventDefault()
+    try {
+      if (editClient) {
+        await api(`/inbounds/${inboundId}/clients/${encodeURIComponent(editClient)}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            email: clientForm.email,
+            id: clientForm.id,
+            password: clientForm.password || clientForm.id,
+            enable: clientForm.enable,
+          }),
+        })
+      } else {
+        await api(`/inbounds/${inboundId}/clients`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            email: clientForm.email,
+            id: clientForm.id,
+            password: clientForm.password || clientForm.id,
+            enable: clientForm.enable,
+          }),
+        })
+      }
+      setShowAdd(false)
+      await loadClients()
+    } catch (err) {
+      alert(err.message)
+    }
+  }
+
+  function confirmDelete(client) {
+    setConfirm({
+      title: zh ? '删除客户端' : 'Delete Client',
+      message: zh ? `确认删除客户端 "${client.email}" ?` : `Delete client "${client.email}"?`,
+      onConfirm: async () => {
+        setConfirm(null)
+        try {
+          await api(`/inbounds/${inboundId}/clients/${encodeURIComponent(client.email)}`, { method: 'DELETE' })
+          await loadClients()
+        } catch (err) {
+          alert(err.message)
+        }
+      },
+    })
+  }
+
+  const isShadowsocks = protocol === 'shadowsocks'
+  const idLabel = isShadowsocks ? (zh ? '密码' : 'Password') : 'UUID'
+
+  return (
+    <div style={{ marginTop: 16, borderTop: '1px solid var(--border)', paddingTop: 12 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+        <strong>{zh ? '客户端管理' : 'Clients'}</strong>
+        <button className="btn btn-ghost" type="button" onClick={openAdd}>{zh ? '添加客户端' : 'Add Client'}</button>
+      </div>
+
+      {loading ? <div className="hint">{zh ? '加载中...' : 'Loading...'}</div> : null}
+
+      {clients.length > 0 ? (
+        <div className="table-wrap" style={{ maxHeight: 240, overflow: 'auto' }}>
+          <table>
+            <thead>
+              <tr>
+                <th>{zh ? '邮箱' : 'Email'}</th>
+                <th>{idLabel}</th>
+                <th>{zh ? '状态' : 'Status'}</th>
+                <th>{zh ? '操作' : 'Actions'}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {clients.map((c) => (
+                <tr key={c.email}>
+                  <td>{c.email}</td>
+                  <td style={{ fontFamily: 'monospace', fontSize: 12, maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis' }}>{c.id || c.password || '-'}</td>
+                  <td><span className={`status-pill ${c.enable ? 'ok' : 'bad'}`}>{c.enable ? (zh ? '启用' : 'On') : (zh ? '禁用' : 'Off')}</span></td>
+                  <td>
+                    <button className="btn btn-ghost" type="button" onClick={() => openEdit(c)}>{zh ? '编辑' : 'Edit'}</button>
+                    <button className="btn btn-danger" type="button" onClick={() => confirmDelete(c)}>{zh ? '删除' : 'Delete'}</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        !loading ? <div className="hint">{zh ? '暂无客户端' : 'No clients'}</div> : null
+      )}
+
+      {showAdd ? (
+        <div className="modal-mask" onClick={() => setShowAdd(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 400 }}>
+            <h3 className="modal-title">{editClient ? (zh ? '编辑客户端' : 'Edit Client') : (zh ? '添加客户端' : 'Add Client')}</h3>
+            <form onSubmit={saveClient}>
+              <div className="field">
+                <label>{zh ? '邮箱' : 'Email'}</label>
+                <input value={clientForm.email} onChange={(e) => setClientForm({ ...clientForm, email: e.target.value })} required placeholder="user@example.com" />
+              </div>
+              {!isShadowsocks ? (
+                <div className="field">
+                  <label>UUID</label>
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    <input value={clientForm.id} onChange={(e) => setClientForm({ ...clientForm, id: e.target.value })} required style={{ flex: 1 }} />
+                    <button className="btn btn-ghost" type="button" onClick={() => setClientForm({ ...clientForm, id: genUUID() })}>{zh ? '生成' : 'Gen'}</button>
+                  </div>
+                </div>
+              ) : (
+                <div className="field">
+                  <label>{zh ? '密码' : 'Password'}</label>
+                  <input value={clientForm.password} onChange={(e) => setClientForm({ ...clientForm, password: e.target.value, id: e.target.value })} required />
+                </div>
+              )}
+              <div className="field">
+                <label><input type="checkbox" checked={clientForm.enable} onChange={(e) => setClientForm({ ...clientForm, enable: e.target.checked })} /> {zh ? '启用' : 'Enabled'}</label>
+              </div>
+              <div className="toolbar" style={{ marginTop: 12 }}>
+                <button className="btn btn-primary" type="submit">{zh ? '保存' : 'Save'}</button>
+                <button className="btn btn-ghost" type="button" onClick={() => setShowAdd(false)}>{zh ? '取消' : 'Cancel'}</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      ) : null}
+
+      <ConfirmDialog open={!!confirm} title={confirm?.title} message={confirm?.message} onConfirm={confirm?.onConfirm} onCancel={() => setConfirm(null)} />
+    </div>
+  )
+}
+
+export default function InboundsModule({ t = (k, f) => f || k, lang = 'zh', externalQuery = '' }) {
   const [items, setItems] = React.useState([])
   const [loading, setLoading] = React.useState(false)
   const [message, setMessage] = React.useState('')
@@ -166,6 +349,7 @@ export default function InboundsModule({ t = (k, f) => f || k, lang = 'zh' }) {
   const [editing, setEditing] = React.useState(null)
   const [form, setForm] = React.useState(newForm())
   const [selectedIds, setSelectedIds] = React.useState([])
+  const [confirm, setConfirm] = React.useState(null)
   const fileInputRef = React.useRef(null)
 
   const zh = lang !== 'en'
@@ -187,6 +371,10 @@ export default function InboundsModule({ t = (k, f) => f || k, lang = 'zh' }) {
   React.useEffect(() => {
     load()
   }, [])
+
+  React.useEffect(() => {
+    setQuery(externalQuery || '')
+  }, [externalQuery])
 
   function openCreate(preset = '') {
     setEditing(null)
@@ -256,15 +444,21 @@ export default function InboundsModule({ t = (k, f) => f || k, lang = 'zh' }) {
     }
   }
 
-  async function removeItem(id) {
-    if (!window.confirm(zh ? '确认删除该入站？' : 'Delete this inbound?')) return
-    try {
-      await api(`/inbounds/${id}`, { method: 'DELETE' })
-      await load()
-      setMessage(zh ? '删除成功' : 'Deleted')
-    } catch (e) {
-      setError(e.message)
-    }
+  function removeItem(id) {
+    setConfirm({
+      title: zh ? '删除入站' : 'Delete Inbound',
+      message: zh ? '确认删除该入站？' : 'Delete this inbound?',
+      onConfirm: async () => {
+        setConfirm(null)
+        try {
+          await api(`/inbounds/${id}`, { method: 'DELETE' })
+          await load()
+          setMessage(zh ? '删除成功' : 'Deleted')
+        } catch (e) {
+          setError(e.message)
+        }
+      },
+    })
   }
 
   async function toggleEnable(item) {
@@ -280,6 +474,33 @@ export default function InboundsModule({ t = (k, f) => f || k, lang = 'zh' }) {
     } catch (e) {
       setError(e.message)
     }
+  }
+
+  async function cloneItem(id, remark) {
+    try {
+      await api(`/inbounds/${id}/clone`, { method: 'POST' })
+      setMessage(zh ? `已克隆 "${remark}"` : `Cloned "${remark}"`)
+      await load()
+    } catch (e) {
+      setError(e.message)
+    }
+  }
+
+  async function resetTraffic(id, remark) {
+    setConfirm({
+      title: zh ? '重置流量' : 'Reset Traffic',
+      message: zh ? `确认重置 "${remark}" 的流量计数？` : `Reset traffic counters for "${remark}"?`,
+      onConfirm: async () => {
+        setConfirm(null)
+        try {
+          await api(`/inbounds/${id}/reset-traffic`, { method: 'POST' })
+          setMessage(zh ? '流量已重置' : 'Traffic reset')
+          await load()
+        } catch (e) {
+          setError(e.message)
+        }
+      },
+    })
   }
 
   async function applyAndRestart() {
@@ -332,17 +553,23 @@ export default function InboundsModule({ t = (k, f) => f || k, lang = 'zh' }) {
     }
   }
 
-  async function batchDelete() {
+  function batchDelete() {
     if (selectedIds.length === 0) return
-    if (!window.confirm(zh ? `确认删除选中的 ${selectedIds.length} 项？` : `Delete ${selectedIds.length} selected items?`)) return
-    try {
-      await Promise.all(selectedIds.map((id) => api(`/inbounds/${id}`, { method: 'DELETE' })))
-      setSelectedIds([])
-      setMessage(zh ? '批量删除成功' : 'Batch delete done')
-      await load()
-    } catch (e) {
-      setError(e.message)
-    }
+    setConfirm({
+      title: zh ? '批量删除' : 'Batch Delete',
+      message: zh ? `确认删除选中的 ${selectedIds.length} 项？` : `Delete ${selectedIds.length} selected items?`,
+      onConfirm: async () => {
+        setConfirm(null)
+        try {
+          await Promise.all(selectedIds.map((id) => api(`/inbounds/${id}`, { method: 'DELETE' })))
+          setSelectedIds([])
+          setMessage(zh ? '批量删除成功' : 'Batch delete done')
+          await load()
+        } catch (e) {
+          setError(e.message)
+        }
+      },
+    })
   }
 
   async function exportTemplate(id) {
@@ -464,6 +691,8 @@ export default function InboundsModule({ t = (k, f) => f || k, lang = 'zh' }) {
                 <td>
                   <button className="btn btn-ghost" onClick={() => toggleEnable(item)}>{item.enable ? (zh ? '禁用' : 'Disable') : (zh ? '启用' : 'Enable')}</button>
                   <button className="btn btn-ghost" onClick={() => openEdit(item.id)}>{zh ? '编辑' : 'Edit'}</button>
+                  <button className="btn btn-ghost" onClick={() => cloneItem(item.id, item.remark)}>{zh ? '克隆' : 'Clone'}</button>
+                  <button className="btn btn-ghost" onClick={() => resetTraffic(item.id, item.remark)}>{zh ? '重置流量' : 'Reset Traffic'}</button>
                   <button className="btn btn-ghost" onClick={() => exportTemplate(item.id)}>{zh ? '导出模板' : 'Export'}</button>
                   <button className="btn btn-danger" onClick={() => removeItem(item.id)}>{zh ? '删除' : 'Delete'}</button>
                 </td>
@@ -510,12 +739,14 @@ export default function InboundsModule({ t = (k, f) => f || k, lang = 'zh' }) {
                 <button className="btn btn-ghost" type="button" onClick={() => setOpen(false)}>{zh ? '取消' : 'Cancel'}</button>
               </div>
             </form>
+
+            {editing ? <ClientManager inboundId={editing} protocol={form.protocol} t={t} zh={zh} /> : null}
           </div>
         </div>
       ) : null}
 
+      <ConfirmDialog open={!!confirm} title={confirm?.title} message={confirm?.message} onConfirm={confirm?.onConfirm} onCancel={() => setConfirm(null)} />
       <div className={`hint ${error ? 'err' : ''}`}>{error || message}</div>
     </div>
   )
 }
-

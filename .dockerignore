@@ -1,0 +1,15 @@
+.git
+.github
+.gocache
+release
+front/node_modules
+front/dist
+backend/*.db
+backend/runtime
+runtime
+data
+bin/xray
+backend/z-ui
+.DS_Store
+*.md
+!README.md

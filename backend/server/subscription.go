@@ -2,6 +2,7 @@ package server
 
 import (
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -307,16 +308,31 @@ func (h *SubscriptionHandler) PublicSubscription(c *gin.Context) {
 		c.String(http.StatusInternalServerError, "internal error")
 		return
 	}
-	if c.Param("token") != settings.SubscriptionToken {
+	if subtle.ConstantTimeCompare([]byte(c.Param("token")), []byte(settings.SubscriptionToken)) != 1 {
 		c.String(http.StatusUnauthorized, "invalid token")
 		return
 	}
+
+	// Check for per-client email in URL path: /sub/:token/:email
+	emailFilter := strings.TrimSpace(c.Param("email"))
 
 	links, err := h.buildLinks(c.Request.Host)
 	if err != nil {
 		c.String(http.StatusInternalServerError, "generate subscription failed")
 		return
 	}
+
+	// Filter links by email if specified
+	if emailFilter != "" {
+		filtered := make([]string, 0)
+		for _, link := range links {
+			if linkContainsEmail(link, emailFilter) {
+				filtered = append(filtered, link)
+			}
+		}
+		links = filtered
+	}
+
 	raw := strings.Join(links, "\n")
 	if c.Query("raw") == "1" {
 		c.Header("Content-Type", "text/plain; charset=utf-8")
@@ -325,6 +341,23 @@ func (h *SubscriptionHandler) PublicSubscription(c *gin.Context) {
 	}
 	c.Header("Content-Type", "text/plain; charset=utf-8")
 	c.String(http.StatusOK, base64.StdEncoding.EncodeToString([]byte(raw)))
+}
+
+// linkContainsEmail checks if a proxy link contains the specified email.
+func linkContainsEmail(link, email string) bool {
+	email = strings.ToLower(strings.TrimSpace(email))
+	// Check fragment (#email)
+	if idx := strings.LastIndex(link, "#"); idx > -1 {
+		fragment, _ := url.QueryUnescape(link[idx+1:])
+		if strings.ToLower(strings.TrimSpace(fragment)) == email {
+			return true
+		}
+	}
+	// Check for email in the link body (vmess JSON, ss userInfo, etc.)
+	if strings.Contains(strings.ToLower(link), email) {
+		return true
+	}
+	return false
 }
 
 func (h *SubscriptionHandler) ensureToken() (storage.PanelSettings, error) {

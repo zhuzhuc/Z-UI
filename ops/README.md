@@ -35,8 +35,20 @@ Expected structure:
 ## 3) Install systemd service
 
 ```bash
-mkdir -p /etc/z-ui /opt/z-ui/data /opt/z-ui/runtime
+# Create dedicated service user
+useradd --system --no-create-home --shell /usr/sbin/nologin z-ui
+
+# Create directories
+mkdir -p /etc/z-ui /opt/z-ui/data /opt/z-ui/runtime /opt/z-ui/bin
+cp /opt/z-ui/backend/z-ui /opt/z-ui/bin/z-ui
 cp /opt/z-ui/ops/z-ui.env.example /etc/z-ui/z-ui.env
+
+# Set ownership and permissions
+chown -R z-ui:z-ui /opt/z-ui/data /opt/z-ui/runtime
+chmod 700 /opt/z-ui/data
+chmod 600 /etc/z-ui/z-ui.env
+
+# Install and start service
 cp /opt/z-ui/ops/z-ui.service /etc/systemd/system/z-ui.service
 systemctl daemon-reload
 systemctl enable z-ui
@@ -82,7 +94,10 @@ Renew certificate:
 
 ## 6) Post-deploy checklist
 
-- Change `PANEL_PASSWORD` and `PANEL_SECRET` in `/etc/z-ui/z-ui.env`.
+- Set a strong `PANEL_SECRET` and ensure it is at least 32 chars.
+- Change default admin credentials before first public exposure.
+- Keep `ZUI_STRICT_PRODUCTION=1` in production to block weak secret/default admin startup.
+- Keep `AUTH_COOKIE_SECURE=1` when serving panel over HTTPS.
 - You can regenerate random admin credentials anytime with `z-ui init`.
 - Confirm DB path exists and writable: `/opt/z-ui/data/zui.db`.
 - Confirm runtime writable: `/opt/z-ui/runtime`.
@@ -116,3 +131,7 @@ Configure in `/etc/z-ui/z-ui.env`:
 - `AUTH_MAX_FAILURES`: max failures before lock (default `5`)
 - `AUTH_FAIL_WINDOW_SEC`: rolling window seconds (default `600`)
 - `AUTH_LOCK_SEC`: lock duration seconds (default `900`)
+- `AUTH_SESSION_HOURS`: session cookie ttl in hours (default `24`)
+- `AUTH_COOKIE_NAME`: session cookie name (default `zui_session`)
+- `AUTH_COOKIE_SECURE`: secure cookie flag, use `1` on HTTPS
+- `ZUI_STRICT_PRODUCTION`: reject weak default secret / `admin:admin` in production

@@ -489,8 +489,12 @@ func cmdInit(publicBaseURL string) error {
 	}
 	baseURL = strings.TrimSuffix(baseURL, "/")
 
-	settings.AdminUsername = username
-	settings.AdminPasswordHash = string(hash)
+	owner, err := store.EnsureOwnerUser(username, string(hash))
+	if err != nil {
+		return err
+	}
+	settings.AdminUsername = owner.Username
+	settings.AdminPasswordHash = owner.PasswordHash
 	settings.PublicBaseURL = baseURL
 
 	if _, err := store.UpdatePanelSettings(settings); err != nil {
@@ -515,20 +519,20 @@ func cmdSetUser(username string) error {
 	}
 	defer store.Close()
 
-	cur, err := store.GetPanelSettings()
+	_, err = store.GetPanelSettings()
 	if err != nil {
 		return err
 	}
-	if cur.AdminPasswordHash == "" {
-		hash, _ := bcrypt.GenerateFromPassword([]byte("admin"), bcrypt.DefaultCost)
-		cur.AdminPasswordHash = string(hash)
-	}
-	cur.AdminUsername = username
-	_, err = store.UpdatePanelSettings(cur)
+	owner, err := store.PrimaryUser()
 	if err != nil {
 		return err
 	}
-	fmt.Printf("admin username updated: %s\n", username)
+	updated, err := store.UpdateUserUsername(owner.ID, username)
+	if err != nil {
+		return err
+	}
+	store.SyncLegacyAdminUser(updated)
+	fmt.Printf("admin username updated: %s\n", updated.Username)
 	return nil
 }
 
@@ -546,18 +550,15 @@ func cmdSetPass(password string) error {
 	}
 	defer store.Close()
 
-	cur, err := store.GetPanelSettings()
+	owner, err := store.PrimaryUser()
 	if err != nil {
 		return err
 	}
-	if strings.TrimSpace(cur.AdminUsername) == "" {
-		cur.AdminUsername = "admin"
-	}
-	cur.AdminPasswordHash = string(hash)
-	_, err = store.UpdatePanelSettings(cur)
-	if err != nil {
+	if err := store.UpdateUserPassword(owner.ID, string(hash)); err != nil {
 		return err
 	}
+	owner.PasswordHash = string(hash)
+	store.SyncLegacyAdminUser(owner)
 	fmt.Println("admin password updated")
 	return nil
 }

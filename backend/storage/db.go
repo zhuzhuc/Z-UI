@@ -59,6 +59,16 @@ type PanelSettings struct {
 	AdminPasswordHash    string `json:"adminPasswordHash"`
 }
 
+type User struct {
+	ID           int64     `json:"id"`
+	Username     string    `json:"username"`
+	PasswordHash string    `json:"-"`
+	Role         string    `json:"role"`
+	Status       string    `json:"status"`
+	CreatedAt    time.Time `json:"createdAt"`
+	UpdatedAt    time.Time `json:"updatedAt"`
+}
+
 type AuditLog struct {
 	ID        int64     `json:"id"`
 	Action    string    `json:"action"`
@@ -71,11 +81,17 @@ type AuditLog struct {
 
 var ErrNotFound = errors.New("record not found")
 
-func OpenDefaultStore() (*Store, error) {
+// DefaultDBPath returns the path to the database file.
+func DefaultDBPath() string {
 	dbPath := os.Getenv("ZUI_DB")
 	if dbPath == "" {
 		dbPath = "./zui.db"
 	}
+	return dbPath
+}
+
+func OpenDefaultStore() (*Store, error) {
+	dbPath := DefaultDBPath()
 
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
 		return nil, fmt.Errorf("create db dir: %w", err)
@@ -229,6 +245,24 @@ INSERT INTO panel_settings (id)
 SELECT 1
 WHERE NOT EXISTS (SELECT 1 FROM panel_settings WHERE id = 1)`); err != nil {
 		return fmt.Errorf("init panel_settings row: %w", err)
+	}
+
+	const usersDDL = `
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'admin',
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);`
+	if _, err := s.db.Exec(usersDDL); err != nil {
+		return fmt.Errorf("migrate users: %w", err)
+	}
+
+	if err := s.MigrateClientTraffic(); err != nil {
+		return fmt.Errorf("migrate client_traffic: %w", err)
 	}
 	return nil
 }
@@ -599,6 +633,221 @@ LIMIT ? OFFSET ?`, limit, offset)
 	return items, rows.Err()
 }
 
+func (s *Store) scanUserRow(scanner interface{ Scan(dest ...any) error }) (User, error) {
+	var item User
+	var createdRaw, updatedRaw string
+	if err := scanner.Scan(&item.ID, &item.Username, &item.PasswordHash, &item.Role, &item.Status, &createdRaw, &updatedRaw); err != nil {
+		return User{}, err
+	}
+	if t, ok := parseDBTime(createdRaw); ok {
+		item.CreatedAt = t
+	}
+	if t, ok := parseDBTime(updatedRaw); ok {
+		item.UpdatedAt = t
+	}
+	return item, nil
+}
+
+func (s *Store) ListUsers() ([]User, error) {
+	rows, err := s.db.Query(`
+SELECT id, username, password_hash, role, status, created_at, updated_at
+FROM users
+ORDER BY id ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]User, 0, 8)
+	for rows.Next() {
+		item, err := s.scanUserRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (s *Store) GetUserByUsername(username string) (User, error) {
+	username = strings.TrimSpace(username)
+	if username == "" {
+		return User{}, ErrNotFound
+	}
+	row := s.db.QueryRow(`
+SELECT id, username, password_hash, role, status, created_at, updated_at
+FROM users
+WHERE username = ?
+LIMIT 1`, username)
+	item, err := s.scanUserRow(row)
+	if err == sql.ErrNoRows {
+		return User{}, ErrNotFound
+	}
+	return item, err
+}
+
+func (s *Store) GetUserByID(id int64) (User, error) {
+	row := s.db.QueryRow(`
+SELECT id, username, password_hash, role, status, created_at, updated_at
+FROM users
+WHERE id = ?
+LIMIT 1`, id)
+	item, err := s.scanUserRow(row)
+	if err == sql.ErrNoRows {
+		return User{}, ErrNotFound
+	}
+	return item, err
+}
+
+func (s *Store) CreateUser(username, passwordHash, role string) (User, error) {
+	username = strings.TrimSpace(username)
+	if username == "" || passwordHash == "" {
+		return User{}, errors.New("username and password are required")
+	}
+	role = strings.TrimSpace(role)
+	if role == "" {
+		role = "admin"
+	}
+	res, err := s.db.Exec(`
+INSERT INTO users (username, password_hash, role, status)
+VALUES (?, ?, ?, 'active')`, username, passwordHash, role)
+	if err != nil {
+		return User{}, err
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return User{}, err
+	}
+	return s.GetUserByID(id)
+}
+
+func (s *Store) UpdateUserRole(id int64, role string) (User, error) {
+	role = strings.TrimSpace(role)
+	if role == "" {
+		role = "admin"
+	}
+	_, err := s.db.Exec(`
+UPDATE users
+SET role = ?, updated_at = CURRENT_TIMESTAMP
+WHERE id = ?`, role, id)
+	if err != nil {
+		return User{}, err
+	}
+	return s.GetUserByID(id)
+}
+
+func (s *Store) UpdateUserUsername(id int64, username string) (User, error) {
+	username = strings.TrimSpace(username)
+	if username == "" {
+		return User{}, errors.New("username cannot be empty")
+	}
+	_, err := s.db.Exec(`
+UPDATE users
+SET username = ?, updated_at = CURRENT_TIMESTAMP
+WHERE id = ?`, username, id)
+	if err != nil {
+		return User{}, err
+	}
+	return s.GetUserByID(id)
+}
+
+func (s *Store) UpdateUserPassword(id int64, passwordHash string) error {
+	_, err := s.db.Exec(`
+UPDATE users
+SET password_hash = ?, updated_at = CURRENT_TIMESTAMP
+WHERE id = ?`, passwordHash, id)
+	return err
+}
+
+func (s *Store) DeleteUser(id int64) error {
+	_, err := s.db.Exec(`DELETE FROM users WHERE id = ?`, id)
+	return err
+}
+
+func (s *Store) CountUsers() (int, error) {
+	var count int
+	if err := s.db.QueryRow(`SELECT COUNT(1) FROM users`).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+func (s *Store) CountUsersByRole(role string) (int, error) {
+	var count int
+	if err := s.db.QueryRow(`SELECT COUNT(1) FROM users WHERE role = ?`, strings.TrimSpace(role)).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+func (s *Store) PrimaryUser() (User, error) {
+	row := s.db.QueryRow(`
+SELECT id, username, password_hash, role, status, created_at, updated_at
+FROM users
+WHERE role = 'owner'
+ORDER BY id ASC
+LIMIT 1`)
+	item, err := s.scanUserRow(row)
+	if err == nil {
+		return item, nil
+	}
+	if err != sql.ErrNoRows {
+		return User{}, err
+	}
+	row = s.db.QueryRow(`
+SELECT id, username, password_hash, role, status, created_at, updated_at
+FROM users
+ORDER BY id ASC
+LIMIT 1`)
+	item, err = s.scanUserRow(row)
+	if err == sql.ErrNoRows {
+		return User{}, ErrNotFound
+	}
+	return item, err
+}
+
+func (s *Store) ensureLegacyAdmin(username, passwordHash string) {
+	_, _ = s.db.Exec(`
+UPDATE panel_settings
+SET admin_username = ?, admin_password_hash = ?, updated_at = CURRENT_TIMESTAMP
+WHERE id = 1`, username, passwordHash)
+}
+
+func (s *Store) EnsureOwnerUser(username, passwordHash string) (User, error) {
+	username = strings.TrimSpace(username)
+	if username == "" {
+		username = "admin"
+	}
+	if passwordHash == "" {
+		return User{}, errors.New("password hash required")
+	}
+	var id int64
+	row := s.db.QueryRow(`SELECT id FROM users WHERE role = 'owner' ORDER BY id ASC LIMIT 1`)
+	switch err := row.Scan(&id); err {
+	case sql.ErrNoRows:
+		res, err := s.db.Exec(`INSERT INTO users (username, password_hash, role, status) VALUES (?, ?, 'owner', 'active')`, username, passwordHash)
+		if err != nil {
+			return User{}, err
+		}
+		id, err = res.LastInsertId()
+		if err != nil {
+			return User{}, err
+		}
+	case nil:
+		if _, err := s.db.Exec(`UPDATE users SET username = ?, password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, username, passwordHash, id); err != nil {
+			return User{}, err
+		}
+	default:
+		return User{}, err
+	}
+	s.ensureLegacyAdmin(username, passwordHash)
+	return s.GetUserByID(id)
+}
+
+func (s *Store) SyncLegacyAdminUser(user User) {
+	s.ensureLegacyAdmin(user.Username, user.PasswordHash)
+}
+
 func ensureColumn(db *sql.DB, table, column, alterDDL string) error {
 	rows, err := db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
 	if err != nil {
@@ -629,17 +878,14 @@ func ensureColumn(db *sql.DB, table, column, alterDDL string) error {
 }
 
 func (s *Store) SetAdminCredentials(username, passwordHash string) error {
-	_, err := s.db.Exec(`
-UPDATE panel_settings
-SET admin_username = ?, admin_password_hash = ?, updated_at = CURRENT_TIMESTAMP
-WHERE id = 1`, username, passwordHash)
+	_, err := s.EnsureOwnerUser(username, passwordHash)
 	return err
 }
 
 func (s *Store) GetAdminCredentials() (username string, passwordHash string, err error) {
-	err = s.db.QueryRow(`
-SELECT admin_username, admin_password_hash
-FROM panel_settings
-WHERE id = 1`).Scan(&username, &passwordHash)
-	return
+	user, err := s.PrimaryUser()
+	if err != nil {
+		return "", "", err
+	}
+	return user.Username, user.PasswordHash, nil
 }

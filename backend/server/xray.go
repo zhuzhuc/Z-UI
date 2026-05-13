@@ -156,6 +156,19 @@ func (m *XrayManager) UpdateConfig(c *gin.Context) {
 		return
 	}
 
+	if req.XrayPath != "" {
+		if err := validateFilePath(req.XrayPath); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid xray path"})
+			return
+		}
+	}
+	if req.ConfigPath != "" {
+		if err := validateFilePath(req.ConfigPath); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid config path"})
+			return
+		}
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -179,6 +192,15 @@ func (m *XrayManager) UpdateConfig(c *gin.Context) {
 	})
 }
 
+// validateFilePath checks that a file path is safe (no directory traversal).
+func validateFilePath(p string) error {
+	cleaned := filepath.Clean(p)
+	if strings.Contains(cleaned, "..") {
+		return errors.New("path must not contain .. segments")
+	}
+	return nil
+}
+
 func (m *XrayManager) StatsOverview(c *gin.Context) {
 	overview, err := m.QueryStatsOverview()
 	if err != nil {
@@ -186,6 +208,15 @@ func (m *XrayManager) StatsOverview(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, overview)
+}
+
+func (m *XrayManager) OnlineUsers(c *gin.Context) {
+	users, err := m.QueryOnlineUsers()
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"users": users, "count": len(users)})
 }
 
 func (m *XrayManager) SyncUsage(c *gin.Context) {

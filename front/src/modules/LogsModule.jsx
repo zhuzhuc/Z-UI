@@ -1,7 +1,7 @@
 import React from 'react'
 import { api } from '../shared/api'
 
-export default function LogsModule() {
+export default function LogsModule({ externalQuery = '' }) {
   const [type, setType] = React.useState('xray')
   const [xrayTarget, setXrayTarget] = React.useState('auto')
   const [lines, setLines] = React.useState(300)
@@ -9,11 +9,17 @@ export default function LogsModule() {
   const [content, setContent] = React.useState('')
   const [auditItems, setAuditItems] = React.useState([])
   const [auditQuery, setAuditQuery] = React.useState('')
+  const [textQuery, setTextQuery] = React.useState('')
   const [auditAction, setAuditAction] = React.useState('all')
   const [source, setSource] = React.useState('-')
   const [updatedAt, setUpdatedAt] = React.useState('')
   const [loading, setLoading] = React.useState(false)
   const [error, setError] = React.useState('')
+
+  React.useEffect(() => {
+    if (type === 'audit') setAuditQuery(externalQuery || '')
+    else setTextQuery(externalQuery || '')
+  }, [externalQuery, type])
 
   const fetchLogs = React.useCallback(async () => {
     setLoading(true)
@@ -72,6 +78,15 @@ export default function LogsModule() {
     return ['all', ...Array.from(set).sort()]
   }, [auditItems])
 
+  const shownContent = React.useMemo(() => {
+    const q = textQuery.trim().toLowerCase()
+    if (!q) return content
+    return String(content || '')
+      .split('\n')
+      .filter((line) => line.toLowerCase().includes(q))
+      .join('\n')
+  }, [content, textQuery])
+
   function exportAuditCSV() {
     if (shownAudit.length === 0) return
     const header = ['time', 'username', 'ip', 'action', 'target', 'detail']
@@ -120,7 +135,9 @@ export default function LogsModule() {
           ) : null}
           {type === 'audit' ? (
             <input value={auditQuery} onChange={(e) => setAuditQuery(e.target.value)} placeholder="搜索 action/user/ip/detail" />
-          ) : null}
+          ) : (
+            <input value={textQuery} onChange={(e) => setTextQuery(e.target.value)} placeholder="搜索日志内容" />
+          )}
           {type === 'audit' ? (
             <select value={auditAction} onChange={(e) => setAuditAction(e.target.value)}>
               {auditActions.map((action) => (
@@ -171,7 +188,7 @@ export default function LogsModule() {
             </table>
           </div>
         ) : (
-          <pre className="log-pre">{content || (error ? '' : '暂无日志')}</pre>
+          <pre className="log-pre">{shownContent || (error ? '' : '暂无日志')}</pre>
         )}
       </div>
 

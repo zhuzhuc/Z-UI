@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -13,10 +14,12 @@ import (
 	"zui/storage"
 )
 
-func RegisterRouter() *gin.Engine {
+func RegisterRouter() (*gin.Engine, *storage.Store) {
 	engine := gin.Default()
 	configureTrustedProxies(engine)
 	engine.Use(corsMiddleware())
+	engine.Use(securityHeaders())
+	engine.Use(rateLimiter(120, time.Minute)) // 120 requests per minute per IP
 	registerStaticRoutes(engine)
 
 	store, err := storage.OpenDefaultStore()
@@ -27,6 +30,9 @@ func RegisterRouter() *gin.Engine {
 	if err := authHandler.EnsureDefaultAdmin(); err != nil {
 		log.Fatalf("init default admin failed: %v", err)
 	}
+	if err := authHandler.ValidateProductionReadiness(); err != nil {
+		log.Fatalf("production security check failed: %v", err)
+	}
 	inboundHandler := server.NewInboundHandler(store)
 	xrayManager := server.NewXrayManager(store)
 	dashboardHandler := server.NewDashboardHandler(store, xrayManager, time.Now())
@@ -35,61 +41,98 @@ func RegisterRouter() *gin.Engine {
 	logHandler := server.NewLogHandler(xrayManager)
 	toolsHandler := server.NewToolsHandler()
 	auditHandler := server.NewAuditHandler(store)
+	usersHandler := server.NewUsersHandler(store)
+	backupHandler := server.NewBackupHandler(store)
+
+	// Role definitions for RBAC
+	viewer := server.RequireRole("viewer", "operator", "admin", "owner")
+	operator := server.RequireRole("operator", "admin", "owner")
+	admin := server.RequireRole("admin", "owner")
 
 	api := engine.Group("/api/v1")
 	{
 		api.GET("/health", func(c *gin.Context) {
-			c.JSON(http.StatusOK, gin.H{"status": "ok"})
+			c.JSON(http.StatusOK, gin.H{"status": "ok", "version": server.Version})
 		})
-		api.POST("/auth/login", authHandler.Login)
+		api.GET("/public/settings", settingsHandler.Public)
+		api.POST("/auth/login", maxBodyBytes(4096), authHandler.Login)
 		api.GET("/sub/:token", subscriptionHandler.PublicSubscription)
+		api.GET("/sub/:token/*email", subscriptionHandler.PublicSubscription)
 
 		protected := api.Group("")
 		protected.Use(authHandler.AuthMiddleware())
+		protected.Use(csrfMiddleware())
 		{
+			// Self-service routes (any authenticated user)
 			protected.GET("/auth/me", authHandler.Me)
-			protected.POST("/auth/change-username", authHandler.ChangeUsername)
-			protected.POST("/auth/change-password", authHandler.ChangePassword)
-			protected.GET("/dashboard/summary", dashboardHandler.Summary)
-			protected.GET("/panel/settings", settingsHandler.Get)
-			protected.PUT("/panel/settings", settingsHandler.Update)
-			protected.GET("/subscription/info", subscriptionHandler.Info)
-			protected.POST("/subscription/rotate", subscriptionHandler.Rotate)
-			protected.GET("/subscription/preview", subscriptionHandler.Preview)
-			protected.GET("/subscription/nodes", subscriptionHandler.Nodes)
-			protected.GET("/logs/xray", logHandler.Xray)
-			protected.GET("/logs/system", logHandler.System)
-			protected.GET("/tools/bbr", toolsHandler.BBRStatus)
-			protected.POST("/tools/bbr/enable", toolsHandler.BBREnable)
-			protected.POST("/tools/speedtest", toolsHandler.Speedtest)
-			protected.GET("/audit/logs", auditHandler.List)
+			protected.POST("/auth/logout", authHandler.Logout)
+			protected.POST("/auth/change-username", maxBodyBytes(4096), authHandler.ChangeUsername)
+			protected.POST("/auth/change-password", maxBodyBytes(4096), authHandler.ChangePassword)
 
+			// Read-only routes (all roles including viewer)
+			protected.GET("/dashboard/summary", viewer, dashboardHandler.Summary)
+			protected.GET("/panel/settings", viewer, settingsHandler.Get)
+			protected.GET("/subscription/info", viewer, subscriptionHandler.Info)
+			protected.GET("/subscription/preview", viewer, subscriptionHandler.Preview)
+			protected.GET("/subscription/nodes", viewer, subscriptionHandler.Nodes)
+			protected.GET("/logs/xray", viewer, logHandler.Xray)
+			protected.GET("/logs/system", viewer, logHandler.System)
+			protected.GET("/tools/bbr", viewer, toolsHandler.BBRStatus)
+			protected.GET("/audit/logs", viewer, auditHandler.List)
+
+			// Operator routes (operator, admin, owner)
+			protected.POST("/subscription/rotate", operator, subscriptionHandler.Rotate)
+			protected.POST("/tools/bbr/enable", operator, maxBodyBytes(4096), toolsHandler.BBREnable)
+			protected.POST("/tools/speedtest", operator, maxBodyBytes(4096), toolsHandler.Speedtest)
+			protected.POST("/xray/start", operator, xrayManager.Start)
+			protected.POST("/xray/stop", operator, xrayManager.Stop)
+			protected.POST("/xray/restart", operator, xrayManager.Restart)
+			protected.POST("/xray/apply", operator, xrayManager.ApplyConfig)
+			protected.POST("/xray/stats/sync", operator, xrayManager.SyncUsage)
+
+			// Inbound routes (read for viewer+, write for operator+)
 			inbounds := protected.Group("/inbounds")
 			{
-				inbounds.GET("", inboundHandler.List)
-				inbounds.GET("/:id", inboundHandler.Get)
-				inbounds.POST("", inboundHandler.Create)
-				inbounds.PUT("/:id", inboundHandler.Update)
-				inbounds.DELETE("/:id", inboundHandler.Delete)
+				inbounds.GET("", viewer, inboundHandler.List)
+				inbounds.GET("/:id", viewer, inboundHandler.Get)
+				inbounds.POST("", operator, maxBodyBytes(256*1024), inboundHandler.Create)
+				inbounds.PUT("/:id", operator, maxBodyBytes(256*1024), inboundHandler.Update)
+				inbounds.DELETE("/:id", admin, inboundHandler.Delete)
+				inbounds.POST("/:id/clone", operator, inboundHandler.Clone)
+				inbounds.POST("/:id/reset-traffic", operator, inboundHandler.ResetTraffic)
+
+				// Client management within inbounds
+				inbounds.GET("/:id/clients", viewer, inboundHandler.ListClients)
+				inbounds.POST("/:id/clients", operator, maxBodyBytes(4096), inboundHandler.AddClient)
+				inbounds.PUT("/:id/clients/:email", operator, maxBodyBytes(4096), inboundHandler.UpdateClient)
+				inbounds.DELETE("/:id/clients/:email", operator, inboundHandler.DeleteClient)
 			}
 
-			xray := protected.Group("/xray")
-			{
-				xray.GET("/status", xrayManager.GetStatus)
-				xray.POST("/start", xrayManager.Start)
-				xray.POST("/stop", xrayManager.Stop)
-				xray.POST("/restart", xrayManager.Restart)
-				xray.POST("/apply", xrayManager.ApplyConfig)
-				xray.GET("/config", xrayManager.GetConfig)
-				xray.PUT("/config", xrayManager.UpdateConfig)
-				xray.GET("/stats/overview", xrayManager.StatsOverview)
-				xray.POST("/stats/sync", xrayManager.SyncUsage)
-				xray.GET("/limits/preview", xrayManager.LimitPreview)
-			}
+			// Xray read routes (viewer+)
+			protected.GET("/xray/status", viewer, xrayManager.GetStatus)
+			protected.GET("/xray/config", viewer, xrayManager.GetConfig)
+			protected.GET("/xray/stats/overview", viewer, xrayManager.StatsOverview)
+			protected.GET("/xray/limits/preview", viewer, xrayManager.LimitPreview)
+			protected.GET("/xray/online", viewer, xrayManager.OnlineUsers)
+
+			// Xray write routes (operator+)
+			protected.PUT("/xray/config", operator, maxBodyBytes(64*1024), xrayManager.UpdateConfig)
+
+			// Admin routes (admin, owner)
+			protected.PUT("/panel/settings", admin, maxBodyBytes(16*1024), settingsHandler.Update)
+			protected.GET("/users", admin, usersHandler.List)
+			protected.POST("/users", admin, maxBodyBytes(4096), usersHandler.Create)
+			protected.PUT("/users/:id", admin, maxBodyBytes(4096), usersHandler.Update)
+			protected.POST("/users/:id/password", admin, maxBodyBytes(4096), usersHandler.ResetPassword)
+			protected.DELETE("/users/:id", admin, usersHandler.Delete)
+
+			// Backup/restore (admin+)
+			protected.GET("/backup/download", admin, backupHandler.Download)
+			protected.POST("/backup/restore", admin, maxBodyBytes(100*1024*1024), backupHandler.Restore)
 		}
 	}
 
-	return engine
+	return engine, store
 }
 
 func registerStaticRoutes(engine *gin.Engine) {
@@ -168,7 +211,12 @@ func corsMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		origin := c.GetHeader("Origin")
 		if allowAny {
-			c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
+			if origin != "" {
+				c.Writer.Header().Set("Access-Control-Allow-Origin", origin)
+				c.Writer.Header().Set("Vary", "Origin")
+			} else {
+				c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
+			}
 		} else if origin != "" {
 			if _, ok := originSet[origin]; ok {
 				c.Writer.Header().Set("Access-Control-Allow-Origin", origin)
@@ -178,12 +226,138 @@ func corsMiddleware() gin.HandlerFunc {
 
 		c.Writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		c.Writer.Header().Set("Access-Control-Allow-Credentials", "true")
 
 		if c.Request.Method == http.MethodOptions {
 			c.AbortWithStatus(http.StatusNoContent)
 			return
 		}
 
+		c.Next()
+	}
+}
+
+// securityHeaders adds standard HTTP security headers to all responses.
+func securityHeaders() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Writer.Header().Set("X-Content-Type-Options", "nosniff")
+		c.Writer.Header().Set("X-Frame-Options", "DENY")
+		c.Writer.Header().Set("X-XSS-Protection", "0")
+		c.Writer.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
+		c.Writer.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+		c.Writer.Header().Set("Content-Security-Policy",
+			"default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'")
+		// Only set HSTS when request is over HTTPS (check forwarded proto)
+		if strings.EqualFold(c.GetHeader("X-Forwarded-Proto"), "https") ||
+			c.Request.TLS != nil {
+			c.Writer.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		}
+		c.Next()
+	}
+}
+
+// csrfMiddleware validates Origin/Referer on state-changing requests to prevent CSRF attacks.
+func csrfMiddleware() gin.HandlerFunc {
+	allowedOrigins := parseCSVEnv("CORS_ALLOW_ORIGINS", []string{
+		"http://127.0.0.1:5500",
+		"http://localhost:5500",
+		"http://127.0.0.1:8081",
+		"http://localhost:8081",
+	})
+	originSet := make(map[string]struct{}, len(allowedOrigins))
+	for _, o := range allowedOrigins {
+		originSet[o] = struct{}{}
+	}
+	allowAny := len(allowedOrigins) == 1 && allowedOrigins[0] == "*"
+
+	return func(c *gin.Context) {
+		method := c.Request.Method
+		if method != http.MethodPost && method != http.MethodPut &&
+			method != http.MethodDelete && method != http.MethodPatch {
+			c.Next()
+			return
+		}
+		origin := c.GetHeader("Origin")
+		if origin != "" {
+			if allowAny {
+				c.Next()
+				return
+			}
+			if _, ok := originSet[origin]; ok {
+				c.Next()
+				return
+			}
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "origin not allowed"})
+			return
+		}
+		referer := c.GetHeader("Referer")
+		if referer == "" {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "missing origin/referer"})
+			return
+		}
+		if allowAny {
+			c.Next()
+			return
+		}
+		for _, allowed := range allowedOrigins {
+			if strings.HasPrefix(referer, allowed) {
+				c.Next()
+				return
+			}
+		}
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "referer not allowed"})
+	}
+}
+
+// maxBodyBytes returns middleware that limits the request body size.
+func maxBodyBytes(limit int64) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, limit)
+		c.Next()
+	}
+}
+
+// rateLimiter returns a per-IP sliding window rate limiter middleware.
+func rateLimiter(maxRequests int, window time.Duration) gin.HandlerFunc {
+	type entry struct {
+		count    int
+		resetAt  time.Time
+	}
+	var (
+		mu    sync.Mutex
+		items = make(map[string]*entry)
+	)
+	go func() {
+		for {
+			time.Sleep(window)
+			mu.Lock()
+			now := time.Now()
+			for ip, e := range items {
+				if now.After(e.resetAt) {
+					delete(items, ip)
+				}
+			}
+			mu.Unlock()
+		}
+	}()
+	return func(c *gin.Context) {
+		ip := c.ClientIP()
+		mu.Lock()
+		e, ok := items[ip]
+		now := time.Now()
+		if !ok || now.After(e.resetAt) {
+			e = &entry{count: 0, resetAt: now.Add(window)}
+			items[ip] = e
+		}
+		e.count++
+		count := e.count
+		mu.Unlock()
+		if count > maxRequests {
+			c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
+				"error": "rate limit exceeded, please try again later",
+			})
+			return
+		}
 		c.Next()
 	}
 }

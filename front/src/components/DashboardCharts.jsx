@@ -23,7 +23,14 @@ const defaultProtocol = [
 
 const palette = ['#8b5cf6', '#10b981', '#3b82f6', '#f59e0b', '#ef4444']
 
-export default function DashboardCharts({ history = defaultHistory, protocolData = defaultProtocol, lang = 'zh' }) {
+export default function DashboardCharts({ history = defaultHistory, protocolData = defaultProtocol, lang = 'zh', theme = 'dark' }) {
+  const isDark = theme !== 'light'
+  const gridStroke = isDark ? '#2a2d39' : '#e2e8f0'
+  const tickFill = isDark ? '#64748b' : '#475569'
+  const tooltipBg = isDark ? '#1e212b' : '#ffffff'
+  const tooltipBorder = isDark ? '#334155' : '#e2e8f0'
+  const tooltipColor = isDark ? '#e2e8f0' : '#0f172a'
+
   const pieData = protocolData.length > 0
     ? protocolData.map((item, idx) => ({ ...item, color: item.color || palette[idx % palette.length] }))
     : defaultProtocol
@@ -38,10 +45,17 @@ export default function DashboardCharts({ history = defaultHistory, protocolData
         <div className="chart-box">
           <ResponsiveContainer width="100%" height="100%">
             <ComposedChart data={history}>
-              <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#2a2d39" />
-              <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fill: '#64748b', fontSize: 10 }} />
-              <YAxis axisLine={false} tickLine={false} tick={{ fill: '#64748b', fontSize: 10 }} />
-              <Tooltip contentStyle={{ backgroundColor: '#1e212b', border: '1px solid #334155', borderRadius: 8 }} />
+              <CartesianGrid strokeDasharray="3 3" vertical={false} stroke={gridStroke} />
+              <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fill: tickFill, fontSize: 10 }} />
+              <YAxis axisLine={false} tickLine={false} tick={{ fill: tickFill, fontSize: 10 }} />
+              <Tooltip
+                contentStyle={{
+                  backgroundColor: tooltipBg,
+                  border: `1px solid ${tooltipBorder}`,
+                  borderRadius: 8,
+                  color: tooltipColor,
+                }}
+              />
               <Bar dataKey="up" fill="#6366f1" radius={[4, 4, 0, 0]} barSize={8} />
               <Line type="monotone" dataKey="down" stroke="#10b981" strokeWidth={2.2} dot={{ r: 2 }} activeDot={{ r: 5 }} />
             </ComposedChart>

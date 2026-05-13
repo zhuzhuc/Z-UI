@@ -86,3 +86,27 @@ body { margin: 0; font-family: Inter, -apple-system, BlinkMacSystemFont, 'PingFa
 }
 
 .err { margin-top: 10px; color: #f87171; font-size: 13px; }
+
+.login-extras {
+  display: flex;
+  justify-content: center;
+  gap: 16px;
+  margin-top: 14px;
+}
+
+.link-btn {
+  background: none;
+  border: none;
+  color: var(--text-weak);
+  font-size: 12px;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 6px;
+  width: auto;
+  font-weight: 400;
+}
+
+.link-btn:hover {
+  color: var(--text);
+  background: var(--panel-2);
+}

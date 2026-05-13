@@ -71,9 +71,20 @@ echo "[z-ui] xray config path: $XRAY_CONFIG"
 echo "[z-ui] xray access log: $XRAY_ACCESS_LOG"
 echo "[z-ui] xray error  log: $XRAY_ERROR_LOG"
 mkdir -p "$(dirname "$XRAY_CONFIG")"
+BACKEND_EXEC=()
+if [[ -x "$BACKEND_DIR/z-ui" ]]; then
+  BACKEND_EXEC=("$BACKEND_DIR/z-ui")
+elif [[ -f "$BACKEND_DIR/go.mod" ]]; then
+  BACKEND_EXEC=("go" "run" ".")
+else
+  echo "[z-ui] backend executable not found. expected '$BACKEND_DIR/z-ui'"
+  echo "[z-ui] and no go.mod for fallback go run."
+  exit 1
+fi
+echo "[z-ui] backend command: ${BACKEND_EXEC[*]}"
 (
   cd "$BACKEND_DIR"
-  PORT="$BACKEND_PORT" ZUI_DB="$DB_PATH" XRAY_CONTROL=process XRAY_BIN="$XRAY_BIN" XRAY_CONFIG="$XRAY_CONFIG" XRAY_ACCESS_LOG="$XRAY_ACCESS_LOG" XRAY_ERROR_LOG="$XRAY_ERROR_LOG" go run .
+  PORT="$BACKEND_PORT" ZUI_DB="$DB_PATH" XRAY_CONTROL=process XRAY_BIN="$XRAY_BIN" XRAY_CONFIG="$XRAY_CONFIG" XRAY_ACCESS_LOG="$XRAY_ACCESS_LOG" XRAY_ERROR_LOG="$XRAY_ERROR_LOG" "${BACKEND_EXEC[@]}"
 ) &
 BACKEND_PID=$!
 

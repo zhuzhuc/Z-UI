@@ -150,10 +150,17 @@ func setSysctl(key, value string) error {
 func runSpeedtest(rawURL string) (gin.H, error) {
 	parsed, err := url.Parse(rawURL)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-		return nil, errors.New("测速 URL 不合法")
+		return nil, errors.New("invalid speedtest URL")
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return nil, errors.New("only http/https schemes are allowed")
 	}
 
 	host := parsed.Hostname()
+	if err := validateSpeedtestHost(host); err != nil {
+		return nil, err
+	}
+
 	port := parsed.Port()
 	if port == "" {
 		if strings.EqualFold(parsed.Scheme, "https") {
@@ -163,10 +170,21 @@ func runSpeedtest(rawURL string) (gin.H, error) {
 		}
 	}
 
+	// Resolve host and reject private/reserved IPs
+	ips, err := net.LookupIP(host)
+	if err != nil {
+		return nil, fmt.Errorf("DNS lookup failed: %w", err)
+	}
+	for _, ip := range ips {
+		if isPrivateIP(ip) {
+			return nil, errors.New("speedtest to private/internal addresses is not allowed")
+		}
+	}
+
 	dialStart := time.Now()
 	conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, port), 3*time.Second)
 	if err != nil {
-		return nil, fmt.Errorf("连通性测试失败: %w", err)
+		return nil, fmt.Errorf("connectivity test failed: %w", err)
 	}
 	dialMs := time.Since(dialStart).Milliseconds()
 	_ = conn.Close()
@@ -185,7 +203,7 @@ func runSpeedtest(rawURL string) (gin.H, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("测速请求失败: %s", resp.Status)
+		return nil, fmt.Errorf("speedtest request failed: %s", resp.Status)
 	}
 
 	limitMB := 20
@@ -216,4 +234,56 @@ func runSpeedtest(rawURL string) (gin.H, error) {
 		"cappedAtMB":   limitMB,
 		"testedAt":     time.Now(),
 	}, nil
+}
+
+// validateSpeedtestHost checks if the host is in the allowed speedtest hosts list.
+func validateSpeedtestHost(host string) error {
+	allowed := parseCSVEnv("ZUI_SPEEDTEST_ALLOW_HOSTS", []string{
+		"speed.cloudflare.com",
+	})
+	host = strings.ToLower(strings.TrimSpace(host))
+	for _, a := range allowed {
+		a = strings.ToLower(strings.TrimSpace(a))
+		if strings.HasPrefix(a, "*.") {
+			suffix := a[1:] // ".example.com"
+			if strings.HasSuffix(host, suffix) || host == strings.TrimPrefix(suffix, ".") {
+				return nil
+			}
+		}
+		if host == a {
+			return nil
+		}
+	}
+	return fmt.Errorf("host %q is not in the speedtest allowlist", host)
+}
+
+func parseCSVEnv(key string, defaults []string) []string {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return defaults
+	}
+	parts := strings.Split(raw, ",")
+	items := make([]string, 0, len(parts))
+	for _, part := range parts {
+		v := strings.TrimSpace(part)
+		if v != "" {
+			items = append(items, v)
+		}
+	}
+	if len(items) == 0 {
+		return defaults
+	}
+	return items
+}
+
+// isPrivateIP checks if an IP address is in a private/reserved range.
+func isPrivateIP(ip net.IP) bool {
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+		return true
+	}
+	// Check for 169.254.0.0/16 (AWS metadata, etc.)
+	if ip4 := ip.To4(); ip4 != nil {
+		return ip4[0] == 169 && ip4[1] == 254
+	}
+	return false
 }

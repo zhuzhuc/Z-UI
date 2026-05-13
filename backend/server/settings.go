@@ -23,6 +23,16 @@ type panelSettingsResponse struct {
 	AdminUsername        string `json:"adminUsername"`
 }
 
+type publicPanelSettingsResponse struct {
+	Title              string `json:"title"`
+	Language           string `json:"language"`
+	Theme              string `json:"theme"`
+	RefreshIntervalSec int    `json:"refreshIntervalSec"`
+	RequireLogin       bool   `json:"requireLogin"`
+	AllowRegister      bool   `json:"allowRegister"`
+	PublicBaseURL      string `json:"publicBaseUrl"`
+}
+
 type updatePanelSettingsRequest struct {
 	Title                string `json:"title"`
 	Language             string `json:"language"`
@@ -38,13 +48,23 @@ func NewSettingsHandler(store *storage.Store) *SettingsHandler {
 	return &SettingsHandler{store: store}
 }
 
+func (h *SettingsHandler) Public(c *gin.Context) {
+	item, err := h.store.GetPanelSettings()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, toPublicPanelSettingsResponse(item))
+}
+
 func (h *SettingsHandler) Get(c *gin.Context) {
 	item, err := h.store.GetPanelSettings()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, toPanelSettingsResponse(item))
+	role := getContextRole(c)
+	c.JSON(http.StatusOK, toPanelSettingsResponse(item, role))
 }
 
 func (h *SettingsHandler) Update(c *gin.Context) {
@@ -96,11 +116,12 @@ func (h *SettingsHandler) Update(c *gin.Context) {
 	}
 	recordAudit(c, h.store, "settings.update", "panel", item.Title)
 
-	c.JSON(http.StatusOK, toPanelSettingsResponse(item))
+	role := getContextRole(c)
+	c.JSON(http.StatusOK, toPanelSettingsResponse(item, role))
 }
 
-func toPanelSettingsResponse(item storage.PanelSettings) panelSettingsResponse {
-	return panelSettingsResponse{
+func toPanelSettingsResponse(item storage.PanelSettings, role string) panelSettingsResponse {
+	resp := panelSettingsResponse{
 		Title:                item.Title,
 		Language:             item.Language,
 		Theme:                item.Theme,
@@ -109,6 +130,22 @@ func toPanelSettingsResponse(item storage.PanelSettings) panelSettingsResponse {
 		AllowRegister:        item.AllowRegister,
 		EnableTwoFactorLogin: item.EnableTwoFactorLogin,
 		PublicBaseURL:        item.PublicBaseURL,
-		AdminUsername:        item.AdminUsername,
+	}
+	// Only expose admin username to admin/owner roles
+	if hasAdminPrivilege(role) {
+		resp.AdminUsername = item.AdminUsername
+	}
+	return resp
+}
+
+func toPublicPanelSettingsResponse(item storage.PanelSettings) publicPanelSettingsResponse {
+	return publicPanelSettingsResponse{
+		Title:              item.Title,
+		Language:           item.Language,
+		Theme:              item.Theme,
+		RefreshIntervalSec: item.RefreshIntervalSec,
+		RequireLogin:       item.RequireLogin,
+		AllowRegister:      item.AllowRegister,
+		PublicBaseURL:      item.PublicBaseURL,
 	}
 }
